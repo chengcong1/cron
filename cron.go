@@ -60,6 +60,7 @@ type Entry struct {
 	Next time.Time
 
 	// Prev is the last time this job was run, or the zero time if never.
+	// 上次运行的时间，如果没有运行过则为零
 	Prev time.Time
 
 	// WrappedJob is the thing to run when the Schedule is activated.
@@ -69,6 +70,12 @@ type Entry struct {
 	// It is kept around so that user code that needs to get at the job later,
 	// e.g. via Entries() can do so.
 	Job Job
+
+	// IsRunning is true if the job is currently running.
+	IsRunning bool
+
+	// 上次运行时长
+	LastDuration time.Duration
 }
 
 // Valid returns true if this is not the zero entry.
@@ -97,17 +104,17 @@ func (s byTime) Less(i, j int) bool {
 //
 // Available Settings
 //
-//   Time Zone
-//     Description: The time zone in which schedules are interpreted
-//     Default:     time.Local
+//	Time Zone
+//	  Description: The time zone in which schedules are interpreted
+//	  Default:     time.Local
 //
-//   Parser
-//     Description: Parser converts cron spec strings into cron.Schedules.
-//     Default:     Accepts this spec: https://en.wikipedia.org/wiki/Cron
+//	Parser
+//	  Description: Parser converts cron spec strings into cron.Schedules.
+//	  Default:     Accepts this spec: https://en.wikipedia.org/wiki/Cron
 //
-//   Chain
-//     Description: Wrap submitted jobs to customize behavior.
-//     Default:     A chain that recovers panics and logs them to stderr.
+//	Chain
+//	  Description: Wrap submitted jobs to customize behavior.
+//	  Default:     A chain that recovers panics and logs them to stderr.
 //
 // See "cron.With*" to modify the default behavior.
 func New(opts ...Option) *Cron {
@@ -164,6 +171,9 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 		Schedule:   schedule,
 		WrappedJob: c.chain.Then(cmd),
 		Job:        cmd,
+		// 添加了新的字段
+		IsRunning:    false,
+		LastDuration: 0,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
@@ -270,7 +280,8 @@ func (c *Cron) run() {
 					if e.Next.After(now) || e.Next.IsZero() {
 						break
 					}
-					c.startJob(e.WrappedJob)
+					// c.startJob(e.WrappedJob)
+					c.startJob(e)
 					e.Prev = e.Next
 					e.Next = e.Schedule.Next(now)
 					c.logger.Info("run", "now", now, "entry", e.ID, "next", e.Next)
@@ -305,11 +316,32 @@ func (c *Cron) run() {
 }
 
 // startJob runs the given job in a new goroutine.
-func (c *Cron) startJob(j Job) {
+// 原本的 startJob 方法
+
+//	func (c *Cron) startJob(j Job) {
+//		c.jobWaiter.Add(1)
+//		go func() {
+//			defer c.jobWaiter.Done()
+//			j.Run()
+//		}()
+//	}
+
+// 修改后的 startJob 方法
+func (c *Cron) startJob(e *Entry) {
+	// c.logger.Info("startJob")
+	if e.IsRunning {
+		return
+	}
 	c.jobWaiter.Add(1)
+	t := time.Now()
 	go func() {
-		defer c.jobWaiter.Done()
-		j.Run()
+		defer func() {
+			c.jobWaiter.Done()
+			e.IsRunning = false
+			e.LastDuration = time.Since(t)
+		}()
+		e.IsRunning = true
+		e.WrappedJob.Run()
 	}()
 }
 
